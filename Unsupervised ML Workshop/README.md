@@ -2,7 +2,9 @@
 
 Max Chen, Cornell CS + Stats '21
 
-Unsupervised Machine Learning Workshop Demo focusing on how K-Means works.
+Slides: https://docs.google.com/presentation/d/17RBTJHYs-_ndbuReabTaLBDZ7HpP2uzAyASb4m-zRtw/edit?usp=sharing
+
+Unsupervised Machine Learning Workshop w/ Demo focusing on how K-Means works.
 
 Dependencies:
 
