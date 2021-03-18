@@ -1,1 +1,1 @@
-# Insights-Training-Spring-2020
+# Insights-Training
