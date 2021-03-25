@@ -1,0 +1,210 @@
+---
+title: "LOL Games Prediction (First 15 Minutes)"
+author: "Raye Liu"
+date: "2021/3/26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+League of Legends is a 2009 multiplayer online battle arena video game developed and published by Riot Games. 
+
+In the game, two teams of five players (top, jug, mid, bot/adc, sup) battle in player versus player combat, each team occupying and defending their own half of the map. Each of the ten players controls a character, known as a "champion", with unique abilities and differing styles of play. During a match, champions become more powerful by collecting experience points and purchasing items to defeat the opposing team. In the game's main mode, Summoner's Rift, a team wins by pushing through to the enemy base and destroying their "nexus", a large structure located within it.
+
+```{r map, echo=FALSE,  out.width = '30%'}
+knitr::include_graphics("map.png")
+```
+
+## Data information
+Source: https://www.kaggle.com/benfattori/league-of-legends-diamond-games-first-15-minutes
+
+Data on the first 15 minutes of about 50000 Diamond ranked League of Legends matches in Season 13, Server NA1, scraped using Riot's API.
+
+
+## Preparation
+
+Setting working directory to source folder and importing packages.
+
+```{r import, message=FALSE, results='hide'}
+setwd("~/Desktop/sisi")
+library(dplyr)
+library(ggplot2)
+library(factoextra)
+library(NbClust)
+library(tibble)
+library(MLmetrics)
+library(boot)
+library(pscl)
+library(survey)
+library(caret)
+library(pROC)
+library(ROCR)
+library(randomForest) 
+library(party)
+library(rpart)
+library(corrplot)
+```
+
+## Preprocessing
+
+Data cleaning and preprocessing. Drop the row-id, match-id and two all-zero columns. Factorize the target predicted values: blue_win (either team blue wins the game). Check if there are missing values.
+
+```{r prep}
+df <- as_tibble(read.csv("MatchTimelinesFirst15.csv"))
+names(df)
+summary(df)
+df <- select(df, 
+             -c("X", "matchId", "blueDragonKills", "redDragonKills"))
+summary(df)
+df$blue_win <- as.factor(df$blue_win)
+cat("Null values: ", sum(sapply(df, is.null)))
+```
+
+## Train-test split
+
+Define our own train-test-split function:
+
+```{r tts}
+train_test_split <- function(df, train_size){
+  train_id <- sample(nrow(df), floor(nrow(df)*train_size))
+  df_train <- df[train_id, ]
+  df_test <- df[-train_id, ]
+  datas <- list(df_train, df_test)
+  return(datas)
+}
+```
+
+## Baseline Training: Logistic Regression
+
+Random sampling of 10k observations selected without overlapping from the data, training with a logistic regression threshold of 0.5.
+
+```{r logistic}
+df.10k <- df[sample(nrow(df), 10000), ]
+datas <- train_test_split(df.10k, 0.75)
+df_train_10k <- datas[[1]]
+df_test_10k <- datas[[2]]
+thres <- 0.5       # threshold
+model.10k <- glm(blue_win ~ ., 
+               family = binomial(link = "logit"),
+               data = df_train_10k)
+y_pred = predict(model.10k, select(df_test_10k, -c("blue_win")), type = "response")
+y_pred <- as.factor(ifelse(y_pred >= thres, 1, 0))
+cost_fn <- function(r, pi=0) {
+  mean(abs(r - pi) > 0.5)
+}
+summary(model.10k)
+confusionMatrix(y_pred, df_test_10k$blue_win)
+```
+
+We can see from the confusion matrix that the specificity (TN/TN+FP) is slightly higher than sensitivity/recall (TP/FN+TP), which means in the mis-classified cases, logistic regression tends to classifiy a red-win case to a blue-win case.
+
+## Whole-set logistic regression
+
+```{r logisticw}
+df.all <- df
+datas_all <- train_test_split(df.all, 0.75)
+df_train <- datas_all[[1]]
+df_test <- datas_all[[2]]
+
+model_all <- glm(blue_win ~ ., 
+                 family = binomial(link = "logit"),
+                 data = df_train)
+y_pred = predict(model_all, select(df_test, -c("blue_win")), 
+                 type = "response")
+y_pred <- as.factor(ifelse(y_pred >= thres, 1, 0))
+confusionMatrix(y_pred, df_test$blue_win)
+y_fitted <- as.factor(ifelse(model_all$fitted.values >= thres, 1, 0))
+confusionMatrix(y_fitted, df_train$blue_win)
+```
+
+
+## Validation
+
+### Pseudo-R test
+
+Get model coefficients and pseudo-R test to examine the model's explained variability, improvement from null model to fitted model, and correlation.
+
+Detailed explaination can be found in: https://stats.idre.ucla.edu/other/mult-pkg/faq/general/faq-what-are-pseudo-r-squareds/
+and R documentation: https://www.rdocumentation.org/packages/DescTools/versions/0.99.40/topics/PseudoR2
+
+```{r logw}
+exp(model_all$coefficients)
+pR2(model_all)
+```
+
+### Variable importance (weights)
+
+```{r imp}
+varImp(model_all)
+```
+
+
+### ROC (Receiving Operating Characteristic) & AUC
+
+When we need to check or visualize the performance of the multi-class classification problem, we use the AUC (Area Under The Curve) ROC (Receiver Operating Characteristics) curve. 
+
+An excellent model has AUC near to the 1 which means it has a good measure of separability. A poor model has AUC near to the 0 which means it has the worst measure of separability. In fact, it means it is reciprocating the result. It is predicting 0s as 1s and 1s as 0s. And when AUC is 0.5, it means the model has no class separation capacity whatsoever.
+
+
+```{r roc}
+prob <- predict(model_all, 
+                newdata=select(df_test, -c("blue_win")),
+                type="response")
+pred <- prediction(prob, df_test$blue_win)
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+plot(perf, main = "ROC Curve")
+auc <- performance(pred, measure = "auc")
+auc <- auc@y.values[[1]]
+cat("AUC: ", auc)
+```
+
+### K-fold Cross-Validation, k = 10
+
+```{r k}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10, savePredictions = TRUE)
+mod_fit <- train(blue_win ~ .,  data=df.all, 
+                 method="glm", family="binomial",
+                 trControl = ctrl, tuneLength = 5)
+pred = predict(mod_fit, newdata=select(df_test, -"blue_win"))
+confusionMatrix(data=pred, df_test$blue_win)
+summary(mod_fit)
+```
+
+
+## Random Forest Classification
+
+Train a random forest model with 500 decision trees. Tuning part omitted.
+
+```{r rf}
+rf <- randomForest(blue_win ~ .,  
+                        data = df_train, importance = TRUE) 
+y_pred = predict(rf, newdata = select(df_test, -"blue_win")) 
+rf
+```
+
+Train set & test set confusion matrix:
+```{r confusion}
+confusionMatrix(table(rf$predicted, df_train$blue_win))
+confusionMatrix(table(y_pred, df_test$blue_win))
+```
+
+Plot the model and get the feature importance:
+```{r plot}
+plot(rf, main = "Random Forest Result") 
+importance(rf) 
+varImpPlot(rf) 
+```
+
+
+## Feature correlation
+
+```{r corr, echo=FALSE,  out.width = '80%'}
+knitr::include_graphics("pic/correlation_mat.png")
+```
+
+
